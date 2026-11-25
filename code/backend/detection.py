@@ -12,6 +12,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_IMAGE_PIXELS = 25_000_000
 MAX_DETECTIONS = 20
+DEFAULT_NMS_IOU = 0.7
 MODEL_LOCK = Lock()
 
 
@@ -29,6 +30,8 @@ def active_detector(runs: Path) -> tuple[Path, dict] | None:
     selected = None
     newest = (0, "")
     for folder, report in completed_detector_runs(runs):
+        if report.get("serve") is False:
+            continue
         weights = folder / "weights" / "best.pt"
         try:
             order = (weights.stat().st_mtime_ns, folder.name)
@@ -46,7 +49,9 @@ def retire_detector_weights(runs: Path, keep: Path) -> list[Path]:
         return []
     cutoff = keep.stat().st_mtime_ns, keep.parent.parent.name
     retired = []
-    for folder, _ in completed_detector_runs(runs):
+    for folder, report in completed_detector_runs(runs):
+        if report.get("serve") is False:
+            continue
         weights_dir = folder / "weights"
         if weights_dir == keep.parent or weights_dir.resolve() != runs.resolve() / folder.name / "weights":
             continue
@@ -96,6 +101,7 @@ def predict_upload(contents: bytes, weights: Path, report: dict) -> dict:
             imgsz=report["imgsz"],
             rect=False,
             conf=report["confidence_threshold"],
+            iou=report.get("nms_iou", DEFAULT_NMS_IOU),
             # Ultralytics hides CUDA process-wide when passed the string "cpu".
             device=torch.device("cpu"),
             max_det=MAX_DETECTIONS,

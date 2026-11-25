@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
+const emit = defineEmits(['open-run'])
 const model = ref(null)
 const preview = ref('')
 const filename = ref('')
@@ -88,6 +89,7 @@ onBeforeUnmount(() => {
       <template v-if="model?.test">
         <header class="panel-head detector-model"><h2>检测模型测试结果</h2></header>
         <p class="caption">当前模型 {{ model.model }} · {{ model.source_run }}</p>
+        <button class="button small" @click="emit('open-run', model.source_run)">查看此模型的训练记录</button>
         <p class="caption">VarroaDataset 官方测试集 · {{ model.test.image.samples.toLocaleString('zh-CN') }} 张图片</p>
         <table><tbody>
           <tr><th>单图有无判断准确率</th><td>{{ percentage(model.test.image.accuracy) }}</td></tr>

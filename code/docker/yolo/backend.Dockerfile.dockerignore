@@ -2,13 +2,17 @@
 !backend/
 !backend/requirements.txt
 !backend/classification.py
+!backend/resnet_classification.py
 !backend/compare.py
+!backend/compare_classifiers.py
 !backend/evaluate.py
 !backend/optimize.py
 !backend/locations.py
 !backend/prepare_detection.py
 !backend/detection.py
 !backend/evaluate_detection.py
+!backend/train_detection.py
+!backend/legacy_detection.py
 !backend/api.py
 !backend/train.py
 !backend/train_smoke.py

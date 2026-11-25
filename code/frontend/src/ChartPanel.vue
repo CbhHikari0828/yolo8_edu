@@ -21,7 +21,7 @@ let observer
 
 function draw(instance) {
   instance.setOption({
-    color: ['#0e766e', '#bf7623', '#325ba1'],
+    color: ['#0e766e', '#bf7623', '#325ba1', '#894880'],
     textStyle: { fontFamily: 'system-ui, Microsoft YaHei, sans-serif', color: '#536461' },
     backgroundColor: '#ffffff',
     ...props.options,

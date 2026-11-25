@@ -86,27 +86,68 @@ docker compose exec backend python evaluate.py --run "/runs/$($winner.run_id)" -
 
 网页的“最终测试”页显示验证集筛选规则，并并排展示原方案和优化候选的测试指标。复评结果与原论文的预处理对照分开记录。
 
+## 分类算法对照
+
+在「训练任务 → 有无分类训练」中可选 ResNet18。使用 TorchVision 的 ImageNet 预训练权重初始化，换成有螨和无螨两个类别后，用项目的训练数据微调。与已有 YOLOv8n-cls 和 YOLOv8s-cls 的对照固定官方数据划分、默认裁剪、224×224 输入、30 轮、批大小 32 和种子 2026。ResNet18 使用 ImageNet 归一化和 AdamW，详细参数保存在 `args.yaml`。 [ResNet 原论文](https://arxiv.org/abs/1512.03385) · [TorchVision ResNet18](https://docs.pytorch.org/vision/0.22/models/generated/torchvision.models.resnet18.html)
+
+在 `code/docker/yolo/` 下运行以下命令。`$resnet` 是网页训练完成后显示的实验编号。脚本核对测试图片和标签、训练设置及 0.50 阈值一致后，生成网页「算法对照」读取的报告。页面可导出 PNG、SVG 和 CSV。
+
+```powershell
+$resnet = 'default-8ba5a75afc'
+$small = 'default-585520c466'
+foreach ($run in $resnet, $small) {
+    docker compose exec backend python evaluate.py --run "/runs/$run" --split test --mite-threshold 0.50 --output "/runs/$run/classifier-test"
+    if ($LASTEXITCODE -ne 0) { throw "分类测试失败 $run" }
+}
+docker compose exec backend python compare_classifiers.py --reference /runs/optimized-test --candidates "/runs/$small/classifier-test" "/runs/$resnet/classifier-test"
+```
+
+| 官方测试集（3,408 张） | 准确率 | 宏平均 F1 | 有螨召回率 | 有螨漏判 | 无螨误报 |
+|---|---:|---:|---:|---:|---:|
+| YOLOv8n-cls | 93.10% | 91.33% | 86.62% | 126 | 109 |
+| YOLOv8s-cls | 92.87% | 90.79% | 82.06% | 169 | 74 |
+| ResNet18 | 92.58% | 90.37% | 80.89% | 180 | 73 |
+
+更新运行中的平台时，从 `code/docker/yolo/` 执行 `python update.py`。脚本在重建容器前检查训练任务。YOLOv8 分类任务因后端重启而中断时，可以在该实验记录点击「从检查点续训」，平台会用 `last.pt` 中保留的训练状态接着跑，并继续写入原实验的曲线与日志。
+
 ## 上传照片检测瓦螨
 
 网页的「瓦螨检测」页接受单只蜜蜂的 PNG、JPG 或 WebP 近照。检测模型直接处理照片，显示找到的疑似瓦螨及位置。每张照片最多 10 MB 和 2500 万像素。
 
-检测模型使用原始位置标注训练。换机器训练时，从仓库根目录转换检测数据集，再启动平台训练。以下命令使用同一官方数据划分，先从验证集选检测阈值，再评估测试集。
+### 定位模型对照和图表
+
+在「训练任务 → 瓦螨定位训练」选择 YOLOv3-tiny、YOLOv5n、YOLOv7-tiny 或 YOLOv8n。前三个版本自动作为定位对照。训练 YOLOv8n 对照组时勾选「作为定位对照」。各组使用官方预训练权重，并设置相同轮数、输入尺寸、批大小和随机种子。旧版源码和预训练权重首次使用时下载到 `runs/legacy-sources/` 和 `runs/pretrained/`。
+
+在「算法对照 → 定位模型」选择一组配置。每个模型独立显示一张单图混淆矩阵，行是真实有无瓦螨，列是模型判断的有无瓦螨，图中数值是图片张数。每个模型的置信度阈值用同一验证集和选择规则确定。位置框性能用统一评估得到的 mAP、框 F1 和测试集 P–R 曲线。P–R 曲线使用 IoU 0.50。训练与验证框损失、每轮验证 mAP 来自各版本训练器，用来观察收敛趋势。图表支持 PNG 和 SVG，指标表支持 CSV。
+
+旧版实现固定到 [YOLOv3 v9.6.0](https://github.com/ultralytics/yolov3/releases/tag/v9.6.0)、[YOLOv5 v7.0](https://github.com/ultralytics/yolov5/releases/tag/v7.0) 和 [YOLOv7 仓库固定提交](https://github.com/WongKinYiu/yolov7/tree/a207844b1ce82d204ab36d87d496728d3d2348e7)。对照任务保存训练配置、权重、测试报告和逐图检测结果，便于核对论文图表。
+
+在网页打开「训练任务 → 瓦螨定位训练」，设置初始权重、轮数、输入尺寸、批大小和随机种子，点击「开始定位训练」。默认是从官方预训练权重开始，输入 384、批大小 16、18 轮、种子 2026。选择「当前检测模型（继续微调）」时，实验记录会保存初始模型的实验编号。
+
+网页任务先训练 YOLOv8n 目标检测模型，再用验证集选阈值，最后评估官方测试集并试跑一次上传推理。评估成功后，检测页显示新实验编号并自动使用该实验的权重。可从检测页的「查看此模型的训练记录」返回相应实验，查看每轮 mAP、训练日志和测试指标，下载配置、曲线数据、检测报告和逐图预测。前两版由后端命令创建的检测实验也可在同一页面查询。
+
+换机器训练时，从仓库根目录用原始 `gt.csv` 转换一次检测数据集。生成的 `runs/detection-dataset/` 随运行目录挂载，已有目录可直接使用。然后启动平台，在网页开始训练。
 
 ```powershell
 python code/backend/prepare_detection.py --data DataSet/VarroaDataset-cls --annotations DataSet/mate/gt.csv --output code/docker/yolo/runs/detection-dataset
 cd code/docker/yolo
 docker compose up -d --build
+```
+
+也可以从 `code/docker/yolo/` 用命令行运行相同的检测训练和评估。
+
+```powershell
 $run = 'mite-detection-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 docker compose exec backend yolo detect train model=yolov8n.pt data=/runs/detection-dataset/dataset.yaml imgsz=384 batch=16 epochs=18 workers=4 amp=False mosaic=0 seed=2026 device=0 plots=False project=/runs name=$run
 if ($LASTEXITCODE -ne 0) { throw '瓦螨模型训练失败' }
-docker compose exec backend python evaluate_detection.py --run "/runs/$run" --data /runs/detection-dataset --retire-previous
+docker compose exec backend python evaluate_detection.py --run "/runs/$run" --data /runs/detection-dataset --nms-iou 0.45 --retire-previous
 ```
 
 平台从 `runs/mite-detection*` 中读取训练时间最新、同时具备 `weights/best.pt` 和完整 `detection_report.json` 的检测实验。评估并完成一次 CPU 推理检查后，报告生效，网页自动切换并显示当前实验名。`--retire-previous` 清理旧检测实验的 `best.pt` 和 `last.pt`。测试报告和逐图结果 `detection_predictions.csv` 可用于论文对照。当前检测权重和报告可随运行目录复制到另一台机器使用。
 
 检测训练使用 8,223 张训练图和 2,903 个瓦螨标注框。`mite-detection-20261125-1646` 从首版最佳权重继续微调 6 轮，使用 `hsv_v=0.50`、AdamW、起始学习率 `0.0005` 和 1 轮预热。两版均从验证集选择判断阈值，并在同一批 3,408 张官方测试图上评估。
 
-| 指标 | 首版 `mite-detection` | 当前 `mite-detection-20261125-1646` |
+| 指标 | 首版 `mite-detection` | 第二版 `mite-detection-20261125-1646` |
 |---|---:|---:|
 | 置信度阈值 | 0.30 | 0.20 |
 | 单图有无判断准确率 | 93.43% | 93.16% |
@@ -116,6 +157,20 @@ docker compose exec backend python evaluate_detection.py --run "/runs/$run" --da
 | 误报的无螨图片 | 55 | 114 |
 
 两版在三张来自不同拍摄条件的独立公开近照上均漏检。官方测试结果的适用范围是 VarroaDataset 的拍摄条件。外部抽查照片见 [USDA 蜂巢近照](https://commons.wikimedia.org/wiki/File:Apis_mellifera76-300.jpg)、[Stefan de Konink 近照](https://commons.wikimedia.org/wiki/File:Honey_bee_with_Deformed_Wing_Virus_and_Varroa_destructor.jpg)、[USGS 近照](https://commons.wikimedia.org/wiki/File:Apis_mellifera_and_Verroa2_2019-09-06-19.00.03_ZS_PMax_UDR_(48690841378).jpg)。
+
+### 减少重复圈选
+
+以下对照使用 `mite-detection-20261125-1646` 的 `best.pt`，输入尺寸 384、置信度阈值 0.20。用验证集比较重叠框抑制设置后，选用 `evaluate_detection.py --nms-iou 0.45`。网页读取检测报告的 `nms_iou` 参数。早期报告默认使用 0.70。
+
+| 同一官方测试集上的位置指标 | 重叠阈值 0.70 | 重叠阈值 0.45 |
+|---|---:|---:|
+| 错误框 | 487 | 214 |
+| 漏掉的标注框 | 190 | 208 |
+| 框精确率（IoU ≥ 0.50） | 64.32% | 80.07% |
+| 框召回率（IoU ≥ 0.50） | 82.21% | 80.52% |
+| 框 F1（IoU ≥ 0.50） | 72.17% | 80.30% |
+
+单图混淆矩阵相同，有螨图片仍漏检 119 张，无螨图片仍误报 114 张。切换前的报告和逐图结果保存在该运行的 `before-overlap-filter/`。
 
 ## 查看训练集里的人工标注
 

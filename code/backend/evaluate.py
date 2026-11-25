@@ -1,4 +1,4 @@
-"""Evaluate a saved YOLOv8n-cls experiment using its original preprocessing."""
+"""Evaluate a saved classification experiment using its training preprocessing."""
 
 import argparse
 import csv
@@ -13,6 +13,7 @@ from ultralytics import YOLO
 from ultralytics.data.augment import classify_transforms
 
 from classification import build_metrics, padding_transform, write_metrics
+from resnet_classification import load_resnet, resnet_transforms
 from train import positive_int
 
 
@@ -23,19 +24,26 @@ def evaluate(run: Path, data: Path, split: str, output: Path, batch: int, mite_t
     summary = json.loads((run / "run_summary.json").read_text(encoding="utf-8"))
     size = summary["imgsz"]
     geometry = summary["preprocessing"]
+    resnet = summary.get("model") == "resnet18"
     preprocess = classify_transforms(size=size)
     if geometry == "pad":
         preprocess = transforms.Compose([padding_transform(size), *preprocess.transforms[2:]])
     elif geometry != "default":
         raise ValueError(f"Unknown preprocessing in run summary: {geometry}")
+    if resnet:
+        preprocess = resnet_transforms(size, geometry)
 
     data = data.resolve()
     dataset = datasets.ImageFolder(data / split, transform=preprocess)
     device = torch.device("cuda:0")
     if not torch.cuda.is_available():
         raise RuntimeError("PyTorch cannot access CUDA.")
-    network = YOLO(str(run / "weights" / "best.pt")).model.to(device).fuse(verbose=False).eval()
-    names = [network.names[index] for index in range(len(network.names))]
+    checkpoint = run / "weights" / "best.pt"
+    if resnet:
+        network, names = load_resnet(checkpoint, device)
+    else:
+        network = YOLO(str(checkpoint)).model.to(device).fuse(verbose=False).eval()
+        names = [network.names[index] for index in range(len(network.names))]
     if names != dataset.classes:
         raise ValueError(f"Checkpoint classes {names} do not match dataset classes {dataset.classes}")
     mite = names.index("mite")
@@ -49,6 +57,8 @@ def evaluate(run: Path, data: Path, split: str, output: Path, batch: int, mite_t
             probabilities = network(images.to(device))
             if isinstance(probabilities, (tuple, list)):
                 probabilities = probabilities[0]
+            if resnet:
+                probabilities = probabilities.softmax(dim=1)
             mite_scores = probabilities[:, mite]
             choices = torch.where(mite_scores >= mite_threshold, mite, no_mite)
             confidence = probabilities.gather(1, choices[:, None]).flatten()

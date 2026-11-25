@@ -12,7 +12,7 @@ RUN apt-get update \
 COPY backend/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
-COPY backend/classification.py backend/train.py backend/train_smoke.py backend/compare.py backend/evaluate.py backend/optimize.py backend/locations.py backend/prepare_detection.py backend/detection.py backend/evaluate_detection.py backend/api.py ./
+COPY backend/classification.py backend/resnet_classification.py backend/train.py backend/train_smoke.py backend/compare.py backend/compare_classifiers.py backend/evaluate.py backend/optimize.py backend/locations.py backend/prepare_detection.py backend/detection.py backend/legacy_detection.py backend/evaluate_detection.py backend/train_detection.py backend/api.py ./
 RUN mkdir -p "$YOLO_CONFIG_DIR"
 
 # Set this before the CUDA warm-up creates a cuBLAS handle.

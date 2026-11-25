@@ -97,6 +97,7 @@ table td small { color: var(--muted); }
 .form .check { display: flex; align-items: center; align-self: end; height: 35px; gap: 5px; }
 .form .check input { width: auto; height: auto; accent-color: var(--green); }
 .form .primary { grid-column: 1 / -1; justify-self: stretch; }
+.form .form-note { grid-column: 1 / -1; margin: 0; }
 .status { padding: 4px 7px; font-size: 12px; border-radius: 5px; background: #e9f2eb; color: var(--green); }
 .status.running { background: #fff2d7; color: #805010; }
 .status.failed, .status.interrupted { background: #fce9e3; color: #8c3328; }

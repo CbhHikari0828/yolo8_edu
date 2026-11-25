@@ -1,12 +1,14 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ChartPanel from './ChartPanel.vue'
+import ImageConfusionMatrix from './ImageConfusionMatrix.vue'
 import DetectorPanel from './DetectorPanel.vue'
 import LocationsPanel from './LocationsPanel.vue'
 
-const tabs = [['overview', '数据总览'], ['training', '训练任务'], ['comparison', '预处理对照'], ['test', '最终测试'], ['locations', '瓦螨检测']]
+const tabs = [['overview', '数据总览'], ['training', '训练任务'], ['comparison', '预处理对照'], ['algorithms', '算法对照'], ['test', '最终测试'], ['locations', '瓦螨检测']]
 const splits = [['train', '训练集'], ['val', '验证集'], ['test', '测试集']]
 const methods = { default: '默认裁剪', pad: '等比例补边' }
+const tasks = { classify: '有无分类训练', detect: '瓦螨定位训练' }
 const labels = { mite: '有可见瓦螨', no_mite: '无可见瓦螨' }
 const statusText = { running: '训练中', completed: '已完成', failed: '失败', interrupted: '已中断' }
 const tab = ref('overview')
@@ -17,6 +19,10 @@ const study = ref(null)
 const baselineEvaluation = ref(null)
 const optimizedEvaluation = ref(null)
 const optimization = ref(null)
+const classifierComparison = ref(null)
+const detectorComparison = ref([])
+const comparisonMode = ref('classification')
+const detectorGroup = ref(0)
 const evaluationVariant = ref(null)
 const activeId = ref('')
 const detail = ref(null)
@@ -29,6 +35,10 @@ const opened = ref(null)
 const viewer = ref(null)
 const smoke = ref(false)
 const form = reactive({ model: 'yolov8n-cls', preprocessing: 'default', epochs: 10, imgsz: 160, batch: 32, seed: 42 })
+const trainingMode = ref('classify')
+const detectionForm = reactive({ model: 'yolov8n', initialization: 'pretrained', benchmark: false, epochs: 18, imgsz: 384, batch: 16, seed: 2026 })
+const detectorModels = { 'yolov3-tiny': 'YOLOv3-tiny', yolov5n: 'YOLOv5n', 'yolov7-tiny': 'YOLOv7-tiny', yolov8n: 'YOLOv8n' }
+const trainingParams = computed(() => trainingMode.value === 'detect' ? detectionForm : form)
 let timer
 
 function percent(value) {
@@ -56,9 +66,9 @@ async function loadDetail(id) {
 
 async function refresh() {
   try {
-    const [data, history, comparison, baseline, optimized, tuning] = await Promise.all([
+    const [data, history, comparison, baseline, optimized, tuning, classifiers, detectors] = await Promise.all([
       api('/dataset'), api('/runs'), api('/study'), api('/evaluation'),
-      api('/evaluation?variant=optimized'), api('/optimization'),
+      api('/evaluation?variant=optimized'), api('/optimization'), api('/classifier-comparison'), api('/detector-comparison'),
     ])
     dataset.value = data
     runs.value = history
@@ -66,6 +76,9 @@ async function refresh() {
     baselineEvaluation.value = baseline
     optimizedEvaluation.value = optimized
     optimization.value = tuning
+    classifierComparison.value = classifiers
+    detectorComparison.value = detectors
+    if (detectorGroup.value >= detectors.length) detectorGroup.value = 0
     evaluationVariant.value ??= optimized ? 'optimized' : 'baseline'
     activeId.value ||= study.value?.selection.run_id ?? history[0]?.id ?? ''
     await loadDetail(activeId.value)
@@ -85,12 +98,17 @@ watch(activeId, async id => {
   try { await loadDetail(id) } catch (failure) { error.value = failure.message }
 })
 
+watch(() => [detectionForm.model, detectionForm.benchmark], ([model, benchmark]) => {
+  if (model !== 'yolov8n' || benchmark) detectionForm.initialization = 'pretrained'
+})
+
 onMounted(() => {
   refresh()
   timer = setInterval(async () => {
     if (!runs.value.some(run => run.status === 'running') && !starting.value) return
     try {
       runs.value = await api('/runs')
+      if (!runs.value.some(run => run.status === 'running')) detectorComparison.value = await api('/detector-comparison')
       await loadDetail(activeId.value)
     } catch (failure) {
       error.value = failure.message
@@ -103,8 +121,10 @@ async function launch() {
   starting.value = true
   error.value = ''
   try {
-    const settings = smoke.value ? { ...form, samples_per_class: 16 } : { ...form }
-    const job = await api('/runs', {
+    const isDetection = trainingMode.value === 'detect'
+    const settings = { ...trainingParams.value }
+    if (!isDetection && smoke.value) settings.samples_per_class = 16
+    const job = await api(isDetection ? '/runs/detection' : '/runs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(settings),
@@ -119,9 +139,29 @@ async function launch() {
   }
 }
 
+async function resumeRun(id) {
+  starting.value = true
+  error.value = ''
+  try {
+    const job = await api(`/runs/${id}/resume`, { method: 'POST' })
+    runs.value = runs.value.map(run => run.id === id ? job : run)
+    await loadDetail(id)
+  } catch (failure) {
+    error.value = failure.message
+  } finally {
+    starting.value = false
+  }
+}
+
 function openRun(id) {
   activeId.value = id
+  trainingMode.value = id.startsWith('mite-detection') ? 'detect' : 'classify'
   tab.value = 'training'
+}
+
+function openDetector() {
+  positionMode.value = 'detect'
+  tab.value = 'locations'
 }
 
 async function openImage(sample) {
@@ -140,15 +180,91 @@ function saveTable(name, rows) {
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
+const classifierMetrics = [
+  ['准确率', 'accuracy'], ['宏平均 F1', 'macro_f1'], ['有螨召回率', 'mite_recall'],
+  ['有螨漏判', 'mite_false_negatives'], ['无螨误报', 'mite_false_positives'],
+]
+
+function modelName(model) {
+  return model === 'resnet18' ? 'ResNet18' : detectorModels[model] ?? model
+}
+
+function exportClassifierComparison() {
+  saveTable('classifier-comparison', [
+    ['模型', '实验编号', ...classifierMetrics.map(([name]) => name)],
+    ...classifierComparison.value.models.map(({ metrics }) => [
+      modelName(metrics.model), metrics.source_run, ...classifierMetrics.map(([, key]) => metrics[key]),
+    ]),
+  ])
+}
+
 const total = computed(() => Object.values(dataset.value?.counts ?? {}).reduce((sum, row) => sum + row.mite + row.no_mite, 0))
 const selected = computed(() => study.value?.selection)
 const evaluation = computed(() => evaluationVariant.value === 'optimized' ? optimizedEvaluation.value : baselineEvaluation.value)
 const testMetrics = computed(() => evaluation.value?.metrics)
 const ongoing = computed(() => runs.value.find(run => run.status === 'running'))
 const currentEpoch = computed(() => detail.value?.epochs?.length ?? 0)
+const detectionDetail = computed(() => detail.value?.task === 'detect')
+const evaluatingDetection = computed(() => detectionDetail.value && detail.value?.status === 'running' && (
+  currentEpoch.value >= detail.value.settings.epochs ||
+  detail.value.log?.includes('Selecting confidence from validation images.')
+))
 const completeRuns = computed(() => runs.value.filter(run => run.status === 'completed').length)
 
 const common = { grid: { left: 54, right: 28, top: 48, bottom: 46, containLabel: true }, tooltip: { trigger: 'axis' }, legend: { top: 8 }, animation: false }
+const currentDetectorGroup = computed(() => detectorComparison.value[detectorGroup.value])
+const detectorRows = computed(() => currentDetectorGroup.value?.models ?? [])
+const detectorMatrixMax = computed(() => Math.max(1, ...detectorRows.value.flatMap(run => run.test.image.confusion_matrix.flat())))
+
+function exportDetectorComparison() {
+  saveTable('detector-comparison', [
+    ['模型', '实验编号', 'mAP@0.50', 'mAP@0.50:0.95', '位置框 F1', '单图召回率', '漏检照片', '误报照片'],
+    ...detectorRows.value.map(run => [
+      modelName(run.settings.model), run.id, run.test.map50, run.test.map50_95, run.test.boxes_at_iou50.f1,
+      run.test.image.mite_recall, run.test.image.mite_false_negatives, run.test.image.mite_false_positives,
+    ]),
+  ])
+}
+
+const detectorChart = computed(() => ({
+  ...common,
+  xAxis: { type: 'category', data: ['mAP@0.50', 'mAP@0.50:0.95', '位置框 F1'] },
+  yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+  series: detectorRows.value.map(run => ({
+    name: modelName(run.settings.model), type: 'bar', barMaxWidth: 50,
+    data: [run.test.map50, run.test.map50_95, run.test.boxes_at_iou50.f1].map(value => Number((100 * value).toFixed(2))),
+  })),
+}))
+
+function detectorEpochChart(key, asPercentage = false) {
+  return {
+    ...common,
+    xAxis: { type: 'value', name: '轮次', min: 1, minInterval: 1 },
+    yAxis: { type: 'value', min: 0, max: asPercentage ? 100 : undefined, axisLabel: { formatter: asPercentage ? '{value}%' : '{value}' } },
+    series: detectorRows.value.map(run => ({
+      name: modelName(run.settings.model), type: 'line', showSymbol: run.epochs.length < 3,
+      data: run.epochs.filter(epoch => epoch[key] != null).map(epoch => [epoch.epoch, Number((epoch[key] * (asPercentage ? 100 : 1)).toFixed(5))]),
+    })),
+  }
+}
+
+const prChart = computed(() => ({
+  ...common,
+  xAxis: { type: 'value', name: '召回率', min: 0, max: 1, nameLocation: 'middle', nameGap: 27 },
+  yAxis: { type: 'value', name: '精确率', min: 0, max: 1, nameLocation: 'middle', nameGap: 44 },
+  series: detectorRows.value.filter(run => run.test.pr50).map(run => ({
+    name: modelName(run.settings.model), type: 'line', showSymbol: run.test.pr50.length < 3, data: run.test.pr50,
+  })),
+}))
+const classifierChart = computed(() => ({
+  ...common,
+  xAxis: { type: 'category', data: classifierMetrics.slice(0, 3).map(([name]) => name) },
+  yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+  series: (classifierComparison.value?.models ?? []).map(({ metrics }) => ({
+    name: modelName(metrics.model), type: 'bar', barMaxWidth: 52, label: { show: true, position: 'top', formatter: '{c}%' },
+    data: classifierMetrics.slice(0, 3).map(([, key]) => Number((100 * metrics[key]).toFixed(2))),
+  })),
+}))
 const datasetChart = computed(() => ({
   ...common,
   xAxis: { type: 'category', data: splits.map(([, label]) => label) },
@@ -170,8 +286,12 @@ function epochChart(series, isPercent = false) {
     })),
   }
 }
-const losses = computed(() => epochChart([['训练损失', 'train/loss'], ['验证损失', 'val/loss']]))
-const accuracies = computed(() => epochChart([['验证准确率', 'metrics/accuracy_top1']], true))
+const losses = computed(() => epochChart(detectionDetail.value
+  ? [['训练框损失', 'train/box_loss'], ['验证框损失', 'val/box_loss']]
+  : [['训练损失', 'train/loss'], ['验证损失', 'val/loss']]))
+const accuracies = computed(() => epochChart(detectionDetail.value
+  ? [['mAP@0.50', 'metrics/mAP50(B)'], ['mAP@0.50:0.95', 'metrics/mAP50-95(B)']]
+  : [['验证准确率', 'metrics/accuracy_top1']], true))
 
 const comparisonGroups = computed(() => {
   if (study.value) return study.value.groups
@@ -239,7 +359,7 @@ function evaluationLink(path) {
 <template>
   <div class="workspace">
     <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">V</span><div><strong>瓦螨实验台</strong><small>YOLOv8 分类研究</small></div></div>
+      <div class="brand"><span class="brand-mark">V</span><div><strong>瓦螨实验台</strong><small>YOLOv8 训练与检测</small></div></div>
       <nav aria-label="功能导航">
         <button v-for="[id, name] in tabs" :key="id" :class="{ current: tab === id }" :aria-current="tab === id ? 'page' : undefined" @click="tab = id">{{ name }}</button>
       </nav>
@@ -248,7 +368,7 @@ function evaluationLink(path) {
 
     <main>
       <header class="topbar">
-        <div><h1>{{ tabs.find(([id]) => id === tab)?.[1] }}</h1><p>{{ tab === 'locations' ? '上传蜜蜂近照，查看检测到的瓦螨位置' : '蜜蜂图像中可见瓦螨的二分类实验' }}</p></div>
+        <div><h1>{{ tabs.find(([id]) => id === tab)?.[1] }}</h1><p>{{ tab === 'locations' ? '上传蜜蜂近照，查看检测到的瓦螨位置' : '蜜蜂图像中的瓦螨分类与定位实验' }}</p></div>
         <button class="button" @click="refresh">刷新数据</button>
       </header>
       <p v-if="error" class="notice error" role="alert">{{ error }}</p>
@@ -259,7 +379,7 @@ function evaluationLink(path) {
           <button class="button" :class="{ active: positionMode === 'detect' }" :aria-pressed="positionMode === 'detect'" @click="positionMode = 'detect'">上传照片检测</button>
           <button class="button" :class="{ active: positionMode === 'annotations' }" :aria-pressed="positionMode === 'annotations'" @click="positionMode = 'annotations'">查看训练集标注</button>
         </div>
-        <DetectorPanel v-if="positionMode === 'detect'" />
+        <DetectorPanel v-if="positionMode === 'detect'" @open-run="openRun" />
         <LocationsPanel v-else />
       </template>
 
@@ -282,7 +402,7 @@ function evaluationLink(path) {
         </div>
         <section v-if="runs.length" class="panel">
           <header class="panel-head"><h2>最近的实验</h2><button class="button small" @click="tab = 'training'">查看训练任务</button></header>
-          <div class="history"><button v-for="run in runs.slice(0, 4)" :key="run.id" @click="openRun(run.id)"><span>{{ run.id }}</span><span>{{ methods[run.settings.preprocessing] }}</span><span>{{ statusText[run.status] }}</span></button></div>
+          <div class="history"><button v-for="run in runs.slice(0, 4)" :key="run.id" @click="openRun(run.id)"><span>{{ run.id }}</span><span>{{ run.task === 'detect' ? '瓦螨定位' : methods[run.settings.preprocessing] }}</span><span>{{ statusText[run.status] }}</span></button></div>
         </section>
       </template>
 
@@ -290,31 +410,70 @@ function evaluationLink(path) {
         <div class="grid two">
           <section class="panel">
             <header class="panel-head"><h2>启动训练</h2></header>
+            <div class="tools position-tools" aria-label="训练类型">
+              <button v-for="(label, type) in tasks" :key="type" type="button" class="button"
+                :class="{ active: trainingMode === type }" :aria-pressed="trainingMode === type"
+                @click="trainingMode = type">{{ label }}</button>
+            </div>
             <form class="form" @submit.prevent="launch">
-              <label>模型<select v-model="form.model" aria-label="模型"><option value="yolov8n-cls">YOLOv8n-cls</option><option value="yolov8s-cls">YOLOv8s-cls</option></select></label>
-              <label>预处理<select v-model="form.preprocessing"><option value="default">默认裁剪</option><option value="pad">等比例补边</option></select></label>
-              <label>训练轮数<input v-model.number="form.epochs" type="number" min="1" max="200" required></label>
-              <label>输入尺寸<input v-model.number="form.imgsz" type="number" min="32" max="640" step="32" required></label>
-              <label>批大小<input v-model.number="form.batch" type="number" min="1" max="64" required></label>
-              <label>随机种子<input v-model.number="form.seed" type="number" min="0" max="4294967295" required></label>
-              <label class="check"><input v-model="smoke" type="checkbox">小样本试跑（每类 16 张）</label>
-              <button class="button primary" :disabled="starting || !!ongoing || !online">{{ ongoing ? '训练进行中' : starting ? '启动中…' : '开始训练' }}</button>
+              <template v-if="trainingMode === 'classify'">
+                <label>模型<select v-model="form.model" aria-label="模型"><option value="yolov8n-cls">YOLOv8n-cls</option><option value="yolov8s-cls">YOLOv8s-cls</option><option value="resnet18">ResNet18</option></select></label>
+                <label>预处理<select v-model="form.preprocessing"><option value="default">默认裁剪</option><option value="pad">等比例补边</option></select></label>
+              </template>
+              <template v-else>
+                <label>定位模型<select v-model="detectionForm.model" aria-label="定位模型"><option v-for="(label, model) in detectorModels" :key="model" :value="model">{{ label }}</option></select></label>
+                <label>初始权重<select v-model="detectionForm.initialization" aria-label="初始权重"><option value="pretrained">官方预训练权重</option><option value="active" :disabled="detectionForm.model !== 'yolov8n' || detectionForm.benchmark">当前检测模型（继续微调）</option></select></label>
+              </template>
+              <label>训练轮数<input v-model.number="trainingParams.epochs" type="number" min="1" max="200" required></label>
+              <label>输入尺寸<input v-model.number="trainingParams.imgsz" type="number" :min="trainingMode === 'detect' || form.model === 'resnet18' ? 64 : 32" max="640" step="32" required></label>
+              <label>批大小<input v-model.number="trainingParams.batch" type="number" min="1" max="64" required></label>
+              <label>随机种子<input v-model.number="trainingParams.seed" type="number" min="0" max="4294967295" required></label>
+              <label v-if="trainingMode === 'classify'" class="check"><input v-model="smoke" type="checkbox">小样本试跑（每类 16 张）</label>
+              <template v-else>
+                <label v-if="detectionForm.model === 'yolov8n'" class="check"><input v-model="detectionForm.benchmark" type="checkbox">作为定位对照</label>
+                <p class="caption form-note">{{ detectionForm.model !== 'yolov8n' || detectionForm.benchmark ? '任务完成后将生成定位对照指标和混淆矩阵。' : '评估完成后，新权重自动用于「瓦螨检测」。' }}</p>
+              </template>
+              <button class="button primary" :disabled="starting || !!ongoing || !online">{{ ongoing ? '训练进行中' : starting ? '启动中…' : trainingMode === 'detect' ? '开始定位训练' : '开始训练' }}</button>
             </form>
           </section>
           <section class="panel">
-            <header class="panel-head"><h2>实验记录</h2><span v-if="detail" :class="['status', detail.status]">{{ statusText[detail.status] }}</span></header>
-            <label class="run-select">选择实验<select v-model="activeId"><option disabled value="">请选择实验</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ run.id }} · {{ statusText[run.status] }}</option></select></label>
+            <header class="panel-head"><h2>实验记录</h2><span v-if="detail" :class="['status', detail.status]">{{ evaluatingDetection ? '评估中' : statusText[detail.status] }}</span></header>
+            <label class="run-select">选择实验<select v-model="activeId"><option disabled value="">请选择实验</option><option v-for="run in runs" :key="run.id" :value="run.id">{{ tasks[run.task] }} · {{ run.id }} · {{ statusText[run.status] }}</option></select></label>
             <template v-if="detail">
-              <dl class="details"><div><dt>模型</dt><dd>{{ detail.settings.model ?? 'yolov8n-cls' }}</dd></div><div><dt>预处理</dt><dd>{{ methods[detail.settings.preprocessing] }}</dd></div><div><dt>进度</dt><dd>{{ currentEpoch }} / {{ detail.settings.epochs }} 轮</dd></div><div><dt>验证召回率</dt><dd>{{ percent(detail.validation?.mite_recall) }}</dd></div><div><dt>随机种子</dt><dd>{{ detail.settings.seed }}</dd></div></dl>
-              <progress :max="detail.settings.epochs" :value="currentEpoch" aria-label="训练进度"></progress>
+              <dl class="details">
+                <div><dt>模型</dt><dd>{{ detail.settings.model ?? 'yolov8n-cls' }}</dd></div>
+                <div v-if="detectionDetail"><dt>训练入口</dt><dd>{{ detail.origin === 'web' ? '网页训练任务' : '后端命令' }}</dd></div>
+                <div v-else><dt>预处理</dt><dd>{{ methods[detail.settings.preprocessing] }}</dd></div>
+                <div><dt>进度</dt><dd>{{ currentEpoch }} / {{ detail.settings.epochs ?? '—' }} 轮</dd></div>
+                <div><dt>验证集有螨召回率</dt><dd>{{ percent(detectionDetail ? detail.validation?.image.mite_recall : detail.validation?.mite_recall) }}</dd></div>
+                <div><dt>随机种子</dt><dd>{{ detail.settings.seed ?? '—' }}</dd></div>
+                <div v-if="detectionDetail"><dt>初始权重</dt><dd>{{ detail.settings.initial_source_run ?? (detail.settings.initialization === 'pretrained' ? '官方预训练权重' : '—') }}</dd></div>
+              </dl>
+              <progress v-if="detail.settings.epochs" :max="detail.settings.epochs" :value="currentEpoch" aria-label="训练进度"></progress>
+              <p v-if="detail.status === 'interrupted'" class="caption">后端停止或重启，任务未完成。</p>
+              <button v-if="detail.can_resume" class="button small" :disabled="starting || !!ongoing" @click="resumeRun(detail.id)">从检查点续训</button>
+              <button v-if="detail.serving" class="button small" @click="openDetector">当前用于瓦螨检测</button>
               <div class="tools files"><a v-for="file in detail.files" :key="file" class="button small" :href="`/api/runs/${detail.id}/files/${file}`">{{ file.split('/').pop() }}</a></div>
             </template>
           </section>
         </div>
         <div v-if="detail" class="grid two">
-          <ChartPanel title="训练与验证损失" filename="training-loss" :options="losses" />
-          <ChartPanel title="每轮验证准确率" filename="validation-accuracy" :options="accuracies" />
+          <ChartPanel :title="detectionDetail ? '训练与验证定位损失' : '训练与验证损失'" filename="training-loss" :options="losses" />
+          <ChartPanel :title="detectionDetail ? '每轮验证集位置检测 mAP' : '每轮验证准确率'" filename="validation-metrics" :options="accuracies" />
         </div>
+        <section v-if="detectionDetail && detail?.test" class="panel">
+          <header class="panel-head"><h2>位置检测测试结果</h2><span>{{ number(detail.test.image.samples) }} 张测试图</span></header>
+          <table><tbody>
+            <tr><th>位置检测 mAP@0.50</th><td>{{ percent(detail.test.map50) }}</td></tr>
+            <tr><th>位置检测 mAP@0.50:0.95</th><td>{{ percent(detail.test.map50_95) }}</td></tr>
+            <tr><th>位置框 F1（IoU ≥ 0.50）</th><td>{{ percent(detail.test.boxes_at_iou50.f1) }}</td></tr>
+            <tr><th>单图有无判断准确率</th><td>{{ percent(detail.test.image.accuracy) }}</td></tr>
+            <tr><th>有螨图片召回率</th><td>{{ percent(detail.test.image.mite_recall) }}</td></tr>
+            <tr><th>验证集选定的置信度阈值</th><td>{{ detail.confidence_threshold.toFixed(2) }}</td></tr>
+          </tbody></table>
+        </section>
+        <ImageConfusionMatrix v-if="detectionDetail && detail?.test" title="测试集有无瓦螨混淆矩阵"
+          :filename="`${detail.id}-confusion-matrix`" :matrix="detail.test.image.confusion_matrix" />
         <section v-if="detail?.log" class="panel"><header class="panel-head"><h2>运行日志</h2></header><pre>{{ detail.log }}</pre></section>
       </template>
 
@@ -336,6 +495,64 @@ function evaluationLink(path) {
             </table>
           </section>
         </template>
+      </template>
+
+      <template v-if="tab === 'algorithms'">
+        <div class="tools position-tools">
+          <button class="button" :class="{ active: comparisonMode === 'classification' }" @click="comparisonMode = 'classification'">分类算法</button>
+          <button class="button" :class="{ active: comparisonMode === 'detection' }" @click="comparisonMode = 'detection'">定位模型</button>
+        </div>
+        <template v-if="comparisonMode === 'classification' && classifierComparison">
+          <section class="panel">
+            <header class="panel-head"><h2>分类算法测试对照</h2><button class="button small" @click="exportClassifierComparison">导出 CSV</button></header>
+            <p class="caption">官方测试集 {{ number(classifierComparison.samples) }} 张 · 输入 {{ classifierComparison.protocol.imgsz }} · {{ classifierComparison.protocol.epochs }} 轮 · 批大小 {{ classifierComparison.protocol.batch }} · 种子 {{ classifierComparison.protocol.seed }} · 阈值 {{ classifierComparison.threshold.toFixed(2) }}</p>
+            <table>
+              <thead><tr><th>模型</th><th v-for="[label] in classifierMetrics" :key="label">{{ label }}</th><th>实验</th></tr></thead>
+              <tbody><tr v-for="{ metrics } in classifierComparison.models" :key="metrics.source_run">
+                <th>{{ modelName(metrics.model) }}</th>
+                <td v-for="[, key] in classifierMetrics" :key="key">{{ formatCompare(metrics[key], key) }}</td>
+                <td><button class="button small" @click="openRun(metrics.source_run)">{{ metrics.source_run }}</button></td>
+              </tr></tbody>
+            </table>
+          </section>
+          <ChartPanel title="分类测试指标" filename="classifier-comparison" :options="classifierChart" />
+          <div class="grid two">
+            <ImageConfusionMatrix v-for="{ metrics } in classifierComparison.models" :key="metrics.source_run"
+              :title="`${modelName(metrics.model)} 混淆矩阵`" :filename="`${metrics.model}-confusion-matrix`" :matrix="metrics.confusion_matrix" />
+          </div>
+        </template>
+        <template v-else-if="comparisonMode === 'detection' && currentDetectorGroup">
+          <section class="panel">
+            <header class="panel-head"><h2>定位模型测试对照</h2><button class="button small" @click="exportDetectorComparison">导出 CSV</button></header>
+            <label class="run-select">对照配置<select v-model="detectorGroup">
+              <option v-for="(group, index) in detectorComparison" :key="index" :value="index">
+                {{ group.protocol.epochs }} 轮 · 输入 {{ group.protocol.imgsz }} · 批大小 {{ group.protocol.batch }} · 种子 {{ group.protocol.seed }} · {{ group.models.length }} 个模型
+              </option>
+            </select></label>
+            <table><thead><tr><th>模型</th><th>mAP@0.50</th><th>mAP@0.50:0.95</th><th>位置框 F1</th><th>漏检照片</th><th>误报照片</th><th>实验</th></tr></thead>
+              <tbody><tr v-for="run in detectorRows" :key="run.id">
+                <th>{{ modelName(run.settings.model) }}</th><td>{{ percent(run.test.map50) }}</td><td>{{ percent(run.test.map50_95) }}</td>
+                <td>{{ percent(run.test.boxes_at_iou50.f1) }}</td><td>{{ number(run.test.image.mite_false_negatives) }}</td><td>{{ number(run.test.image.mite_false_positives) }}</td>
+                <td><button class="button small" @click="openRun(run.id)">{{ run.id }}</button></td>
+              </tr></tbody>
+            </table>
+          </section>
+          <ChartPanel title="位置检测测试指标" filename="detector-comparison" :options="detectorChart" />
+          <ChartPanel v-if="prChart.series.length" title="测试集 P–R 曲线（IoU 0.50）" filename="detector-pr50" :options="prChart" />
+          <p class="caption">训练曲线记录各模型训练器的结果。损失值用于观察各自的收敛趋势。</p>
+          <div class="grid two">
+            <ChartPanel title="训练框损失对照" filename="detector-train-box-loss" :options="detectorEpochChart('train/box_loss')" />
+            <ChartPanel title="验证框损失对照" filename="detector-val-box-loss" :options="detectorEpochChart('val/box_loss')" />
+            <ChartPanel title="每轮验证 mAP@0.50 对照" filename="detector-val-map50" :options="detectorEpochChart('metrics/mAP50(B)', true)" />
+            <ChartPanel title="每轮验证 mAP@0.50:0.95 对照" filename="detector-val-map50-95" :options="detectorEpochChart('metrics/mAP50-95(B)', true)" />
+          </div>
+          <div class="grid two">
+            <ImageConfusionMatrix v-for="run in detectorRows" :key="run.id" :title="`${modelName(run.settings.model)} 单图混淆矩阵`"
+              :filename="`${run.settings.model}-${run.id}-confusion-matrix`" :matrix="run.test.image.confusion_matrix" :max="detectorMatrixMax" />
+          </div>
+        </template>
+        <p v-else-if="comparisonMode === 'detection'" class="notice">完成定位对照任务后，测试指标和混淆矩阵会显示在这里。</p>
+        <p v-else class="notice">待同一批测试图片上的算法对照评估完成。</p>
       </template>
 
       <template v-if="tab === 'test'">
