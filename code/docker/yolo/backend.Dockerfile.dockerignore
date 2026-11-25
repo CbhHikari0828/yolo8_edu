@@ -1,0 +1,14 @@
+**
+!backend/
+!backend/requirements.txt
+!backend/classification.py
+!backend/compare.py
+!backend/evaluate.py
+!backend/optimize.py
+!backend/locations.py
+!backend/prepare_detection.py
+!backend/detection.py
+!backend/evaluate_detection.py
+!backend/api.py
+!backend/train.py
+!backend/train_smoke.py

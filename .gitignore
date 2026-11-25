@@ -1,3 +1,9 @@
 /DataSet/mate/
 /DataSet/VarroaDataset-cls/
 /DataSet/VarroaDataset-cls.zip
+/code/docker/yolo/.env
+/code/docker/yolo/runs/
+/code/docker/yolo/images/
+/code/frontend/node_modules/
+/code/frontend/dist/
+/code/backend/__pycache__/
