@@ -90,7 +90,7 @@ docker compose exec backend python evaluate.py --run "/runs/$($winner.run_id)" -
 
 在「训练任务 → 有无分类训练」中可选 ResNet18。使用 TorchVision 的 ImageNet 预训练权重初始化，换成有螨和无螨两个类别后，用项目的训练数据微调。与已有 YOLOv8n-cls 和 YOLOv8s-cls 的对照固定官方数据划分、默认裁剪、224×224 输入、30 轮、批大小 32 和种子 2026。ResNet18 使用 ImageNet 归一化和 AdamW，详细参数保存在 `args.yaml`。 [ResNet 原论文](https://arxiv.org/abs/1512.03385) · [TorchVision ResNet18](https://docs.pytorch.org/vision/0.22/models/generated/torchvision.models.resnet18.html)
 
-在 `code/docker/yolo/` 下运行以下命令。`$resnet` 是网页训练完成后显示的实验编号。脚本核对测试图片和标签、训练设置及 0.50 阈值一致后，生成网页「算法对照」读取的报告。页面可导出 PNG、SVG 和 CSV。
+在 `code/docker/yolo/` 下运行以下命令。`$resnet` 是网页训练完成后显示的实验编号。脚本核对测试图片、标签、训练设置和 0.50 阈值，并保存分类补充实验报告 `runs/classifier_comparison.json`。
 
 ```powershell
 $resnet = 'default-8ba5a75afc'
@@ -116,9 +116,15 @@ docker compose exec backend python compare_classifiers.py --reference /runs/opti
 
 ### 定位模型对照和图表
 
-在「训练任务 → 瓦螨定位训练」选择 YOLOv3-tiny、YOLOv5n、YOLOv7-tiny 或 YOLOv8n。前三个版本自动作为定位对照。训练 YOLOv8n 对照组时勾选「作为定位对照」。各组使用官方预训练权重，并设置相同轮数、输入尺寸、批大小和随机种子。旧版源码和预训练权重首次使用时下载到 `runs/legacy-sources/` 和 `runs/pretrained/`。
+在「算法对照」填写每个模型的训练轮数、输入尺寸、批大小和随机种子，点击「开始定位对照」。平台依次训练 YOLOv3-tiny、YOLOv5n、YOLOv7-tiny、YOLOv8n 和 Faster R-CNN（ResNet18-FPN）。五个模型使用同一份训练、验证和测试划分及瓦螨框标注。
 
-在「算法对照 → 定位模型」选择一组配置。每个模型独立显示一张单图混淆矩阵，行是真实有无瓦螨，列是模型判断的有无瓦螨，图中数值是图片张数。每个模型的置信度阈值用同一验证集和选择规则确定。位置框性能用统一评估得到的 mAP、框 F1 和测试集 P–R 曲线。P–R 曲线使用 IoU 0.50。训练与验证框损失、每轮验证 mAP 来自各版本训练器，用来观察收敛趋势。图表支持 PNG 和 SVG，指标表支持 CSV。
+默认采用随机初始化。选择预训练初始化时，YOLO 使用各自的官方检测权重，Faster R-CNN 使用 ImageNet 预训练的 ResNet18 骨干并随机初始化检测头。Faster R-CNN 每次最多前向计算 4 张，再累积梯度到设置的批大小。各模型保留原生训练器的损失及优化器实现。
+
+「对照记录」会显示各模型的状态和训练日志入口。所有模型完成后，该配置的测试指标和图表会自动展示。可以修改参数另起一组，或从「选择对照实验」回看已保存的结果。分组记录保存在挂载的 `runs/.comparisons/`，每个模型的产物保存在各自的运行目录。
+
+也可以在「训练任务 → 瓦螨定位训练」单独启动任一模型。训练单个 YOLOv8n 对照时勾选「作为定位对照」。旧版源码和预训练权重按需下载到 `runs/legacy-sources/` 和 `runs/pretrained/`。
+
+在「算法对照」选择一组已完成的配置。「同一张测试图的画框对照」并排显示人工标注框和各实验保存的预测框。每个模型的置信度阈值用同一验证集和选择规则确定。主表与 CSV 使用统一的框 mAP、框精确率、框召回率、框 F1、漏检框和误报框。测试集 P–R 曲线使用 IoU 0.50。每个模型另有一张从预测框推得的单图混淆矩阵。训练与验证框损失、每轮验证 mAP 用来观察各自的收敛趋势。图表支持 PNG 和 SVG。
 
 旧版实现固定到 [YOLOv3 v9.6.0](https://github.com/ultralytics/yolov3/releases/tag/v9.6.0)、[YOLOv5 v7.0](https://github.com/ultralytics/yolov5/releases/tag/v7.0) 和 [YOLOv7 仓库固定提交](https://github.com/WongKinYiu/yolov7/tree/a207844b1ce82d204ab36d87d496728d3d2348e7)。对照任务保存训练配置、权重、测试报告和逐图检测结果，便于核对论文图表。
 

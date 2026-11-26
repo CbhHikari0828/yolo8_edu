@@ -22,6 +22,15 @@ from detection import DEFAULT_NMS_IOU, MAX_DETECTIONS, predict_upload, retire_de
 THRESHOLDS = [index / 20 for index in range(2, 17)]
 
 
+def read_boxes(path: Path, shape: tuple[int, int]) -> list[list[float]]:
+    height, width = shape
+    boxes = []
+    for line in path.read_text(encoding="ascii").splitlines():
+        _, x, y, w, h = map(float, line.split())
+        boxes.append([(x - w / 2) * width, (y - h / 2) * height, (x + w / 2) * width, (y + h / 2) * height])
+    return boxes
+
+
 def collect_predictions(model, data: Path, split: str, imgsz: int, batch: int, nms_iou: float = DEFAULT_NMS_IOU) -> list[dict]:
     image_dir = data / "images" / split
     label_dir = data / "labels" / split
@@ -32,11 +41,7 @@ def collect_predictions(model, data: Path, split: str, imgsz: int, batch: int, n
         device=0, rect=False, max_det=MAX_DETECTIONS, verbose=False,
     ):
         name = Path(result.path).name
-        height, width = result.orig_shape
-        actual = []
-        for line in (label_dir / Path(name).with_suffix(".txt")).read_text(encoding="ascii").splitlines():
-            _, x, y, w, h = map(float, line.split())
-            actual.append([(x - w / 2) * width, (y - h / 2) * height, (x + w / 2) * width, (y + h / 2) * height])
+        actual = read_boxes(label_dir / Path(name).with_suffix(".txt"), result.orig_shape)
         detections = sorted(
             zip(result.boxes.conf.tolist(), result.boxes.xyxy.tolist()),
             key=lambda box: box[0],

@@ -12,10 +12,17 @@ def main() -> None:
                               check=True, capture_output=True, text=True).stdout.splitlines()
     if "backend" in services:
         check = """import json
+import urllib.error
 import urllib.request
 
-with urllib.request.urlopen('http://127.0.0.1:8000/api/runs', timeout=10) as response:
-    jobs = json.load(response)
+jobs = []
+for endpoint in ('runs', 'comparison-jobs'):
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:8000/api/{endpoint}', timeout=10) as response:
+            jobs.extend(json.load(response))
+    except urllib.error.HTTPError as error:
+        if endpoint != 'comparison-jobs' or error.code != 404:
+            raise
 active = [record['id'] for record in jobs if record['status'] == 'running']
 if active:
     print('Update delayed while training is active:', ', '.join(active))

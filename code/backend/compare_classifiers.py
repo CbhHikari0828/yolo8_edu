@@ -22,6 +22,7 @@ def main() -> None:
     parser.add_argument("--runs", type=Path, default=Path("/runs"))
     parser.add_argument("--reference", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, nargs="+", required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     baseline, baseline_labels = read_result(args.reference, args.runs)
     shared = ("imgsz", "preprocessing", "seed", "epochs", "batch")
@@ -39,7 +40,8 @@ def main() -> None:
         models.append(candidate)
     summary = {"samples": len(baseline_labels), "threshold": threshold, "protocol": settings,
                "models": models}
-    output = args.runs / "classifier_comparison.json"
+    output = args.output or args.runs / "classifier_comparison.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp")
     temporary.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     temporary.replace(output)

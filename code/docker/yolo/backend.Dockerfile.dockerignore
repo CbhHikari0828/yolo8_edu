@@ -11,6 +11,7 @@
 !backend/prepare_detection.py
 !backend/detection.py
 !backend/evaluate_detection.py
+!backend/faster_rcnn.py
 !backend/train_detection.py
 !backend/legacy_detection.py
 !backend/api.py

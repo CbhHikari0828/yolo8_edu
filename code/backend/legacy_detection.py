@@ -31,7 +31,7 @@ def download(url: str, destination: Path) -> None:
     pending.replace(destination)
 
 
-def prepare_upstream(model: str, weights: Path) -> Path:
+def prepare_upstream(model: str, weights: Path, *, pretrained: bool) -> Path:
     short, project, revision, release, _, _ = SOURCES[model]
     cache = weights.parent.parent / "legacy-sources"
     cache.mkdir(parents=True, exist_ok=True)
@@ -42,7 +42,7 @@ def prepare_upstream(model: str, weights: Path) -> Path:
             download(f"https://codeload.github.com/{project}/zip/{revision}", archive)
         with ZipFile(archive) as files:
             files.extractall(cache)
-    if not is_zipfile(weights):
+    if pretrained and not is_zipfile(weights):
         weights.parent.mkdir(parents=True, exist_ok=True)
         download(f"https://github.com/{project}/releases/download/{release}/{model}.pt", weights)
     return source
@@ -121,7 +121,7 @@ def train(args, source: Path) -> None:
     hyp_path = args.run / "hyp.yaml"
     hyp_path.write_text(yaml.safe_dump(configuration), encoding="utf-8")
     flags = [
-        "--weights", str(args.weights), "--cfg", str(source / cfg), "--data", str(dataset),
+        "--weights", "" if args.scratch else str(args.weights), "--cfg", str(source / cfg), "--data", str(dataset),
         "--hyp", str(hyp_path), "--epochs", str(args.epochs), "--batch-size", str(args.batch),
         "--img-size", str(args.imgsz), "--workers", "4", "--device", "0", "--project", str(args.run.parent),
         "--name", args.run.name, "--exist-ok",
@@ -135,6 +135,7 @@ def train(args, source: Path) -> None:
         runpy.run_path(str(source / "train.py"), run_name="__main__")
         convert_v7_curves(args.run)
     else:
+        flags.extend(("--patience", str(args.epochs)))
         from utils import general
 
         if hasattr(general, "check_git_info"):
@@ -150,7 +151,10 @@ def train(args, source: Path) -> None:
         sys.argv = ["train.py", *flags]
         upstream.main(upstream.parse_opt())
     details = {key: getattr(args, key) for key in ("model", "imgsz", "epochs", "batch", "seed")}
-    details.update(upstream=project, revision=revision, weights_release=release, model_weights=str(args.weights))
+    details.update(upstream=project, revision=revision, initialization="scratch" if args.scratch else "pretrained",
+                   model_weights=None if args.scratch else str(args.weights))
+    if not args.scratch:
+        details["weights_release"] = release
     (args.run / "args.yaml").write_text(yaml.safe_dump(details), encoding="utf-8")
 
 
@@ -198,10 +202,11 @@ def main() -> None:
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--run", type=Path, required=True)
     parser.add_argument("--weights", type=Path, required=True)
+    parser.add_argument("--scratch", action="store_true")
     for name in ("epochs", "imgsz", "batch", "seed"):
         parser.add_argument(f"--{name}", type=int, required=True)
     args = parser.parse_args()
-    source = prepare_upstream(args.model, args.weights)
+    source = prepare_upstream(args.model, args.weights, pretrained=args.mode == "train" and not args.scratch)
     if args.mode == "train":
         use_upstream(source)
         train(args, source)
